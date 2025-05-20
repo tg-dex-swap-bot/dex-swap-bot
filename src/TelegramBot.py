@@ -19,7 +19,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.utils.markdown import hide_link, hcode
 from redis.asyncio import Redis
 
-from src.Storage import TCRedisStorage
+from Storage import TCRedisStorage
 from tonutils.tonconnect import TonConnect
 from tonutils.tonconnect.models import (
     WalletApp,
