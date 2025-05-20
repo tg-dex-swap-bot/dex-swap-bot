@@ -13,7 +13,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.utils.markdown import hide_link, hcode
 from redis.asyncio import Redis
 
-from storage import TCRedisStorage
+from src.Storage import TCRedisStorage
 from tonutils.tonconnect import TonConnect
 from tonutils.tonconnect.models import WalletApp, Event, EventError, SendTransactionResponse
 from tonutils.tonconnect.utils.exceptions import TonConnectError, UserRejectsError, RequestTimeoutError
@@ -29,7 +29,7 @@ bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
 tc = TonConnect(
     storage=TCRedisStorage(redis),
     manifest_url=TC_MANIFEST_URL,
-    wallets_fallback_file_path="./wallets.json"
+    wallets_fallback_file_path="../wallets.json"
 )
 
 
