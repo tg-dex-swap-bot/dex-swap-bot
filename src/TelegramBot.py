@@ -339,7 +339,12 @@ async def set_slippage(message: Message, state: FSMContext):
         await state.update_data(slippage=value)
         await message.answer(f"✅ Slippage set to {value}")
     except ValueError:
-        await message.answer("❌ Invalid value. Enter a positive number.")
+        await error_window(
+            message.from_user.id,
+            "❌ Invalid value. Enter a positive number.",
+            "Try again",
+            "set_slippage",
+        )
         return
     await swap_options_window(message.from_user.id, state)
 
@@ -353,7 +358,12 @@ async def set_max_splits(message: Message, state: FSMContext):
         await state.update_data(max_splits=value)
         await message.answer(f"✅ Max Splits set to {value}")
     except ValueError:
-        await message.answer("❌ Invalid value. Enter a positive integer.")
+        await error_window(
+            message.from_user.id,
+            "❌ Invalid value. Enter a positive integer.",
+            "Try again",
+            "set_max_splits",
+        )
         return
     await swap_options_window(message.from_user.id, state)
 
@@ -367,8 +377,13 @@ async def set_max_length(message: Message, state: FSMContext):
         await state.update_data(max_length=value)
         await message.answer(f"✅ Max Length set to {value}")
     except ValueError:
-        await message.answer("❌ Invalid value. Enter a positive integer.")
-        return
+        await error_window(
+            message.from_user.id,
+            "❌ Invalid value. Enter a positive integer.",
+            "Try again",
+            "set_max_length",
+        )
+        return 
     await swap_options_window(message.from_user.id, state)
 
 
@@ -378,10 +393,10 @@ async def handle_swap_input(message: Message, state: FSMContext) -> None:
 
     if len(parts) != 3:
         await error_window(
-            user_id=message.from_user.id,
-            text="Invalid format.\nUse: <code>TOKEN1 TOKEN2 AMOUNT</code>\nExample: <code>USDT TON 10.5</code>",
-            btn_text="Try again",
-            cb_data="swap_input",
+            message.from_user.id,
+            "Invalid format.\nUse: <code>TOKEN1 TOKEN2 AMOUNT</code>\nExample: <code>USDT TON 10.5</code>",
+            "Try again",
+            "swap_input",
         )
         return
 
@@ -390,10 +405,10 @@ async def handle_swap_input(message: Message, state: FSMContext) -> None:
     for token in (token1, token2):
         if not await _is_valid_token(token):
             await error_window(
-                user_id=message.from_user.id,
-                text=f"Token <code>{token}</code> is not supported.",
-                btn_text="Try again",
-                cb_data="swap_input",
+                message.from_user.id,
+                f"Token <code>{token}</code> is not supported.",
+                "Try again",
+                "swap_input",
             )
             return
 
@@ -403,10 +418,10 @@ async def handle_swap_input(message: Message, state: FSMContext) -> None:
             raise ValueError
     except ValueError:
         await error_window(
-            user_id=message.from_user.id,
-            text="Amount must be a positive number.\nExample: <code>USDT TON 10.5</code>",
-            btn_text="Try again",
-            cb_data="swap_input",
+            message.from_user.id,
+            "Amount must be a positive number.\nExample: <code>USDT TON 10.5</code>",
+            "Try again",
+            "swap_input",
         )
         return
 
@@ -424,6 +439,7 @@ async def callback_query_handler(callback_query: CallbackQuery, state: FSMContex
         await state.update_data(selected_wallet=data.split(":")[1])
         await connect_wallet_window(state, callback_query.from_user.id)
     elif data == "main_menu":
+        await state.update_data(back_state="main_menu")
         await wallet_connected_window(callback_query.from_user.id)
     elif data == "connect_wallet":
         await connect_wallet_window(state, callback_query.from_user.id)
@@ -433,6 +449,7 @@ async def callback_query_handler(callback_query: CallbackQuery, state: FSMContex
     elif data == "cancel_transaction":
         if connector.is_transaction_pending(rpc_request_id):
             connector.cancel_pending_transaction(rpc_request_id)
+        await state.update_data(back_state="main_menu")
         await wallet_connected_window(callback_query.from_user.id)
     elif data == "send_transaction":
         rpc_request_id = await connector.send_transfer(
@@ -461,7 +478,6 @@ async def callback_query_handler(callback_query: CallbackQuery, state: FSMContex
             await bot.delete_message(chat_id=callback_query.from_user.id, message_id=callback_query.message.message_id)
         await wallet_connected_window(callback_query.from_user.id)
     elif data == "swap_options":
-        await state.update_data(prev_menu="swap")
         await swap_options_window(callback_query.from_user.id, state)
     elif data == "set_slippage":
         await state.set_state(SwapStates.setting_slippage)
@@ -474,10 +490,13 @@ async def callback_query_handler(callback_query: CallbackQuery, state: FSMContex
         await bot.send_message(chat_id=callback_query.from_user.id, text="Enter max length (integer):")
     elif data == "back":
         back_state = (await state.get_data()).get("back_state")
+        await state.update_data(back_state="clear")
+
         if back_state == "swap_menu":
             await swap_menu_window(callback_query.from_user.id, state)
         else:
             await wallet_connected_window(callback_query.from_user.id)
+
 
     await callback_query.answer()
 
