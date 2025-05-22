@@ -2,7 +2,7 @@ from typing import Optional
 from decimal import Decimal
 import time
 
-from src.SwapCoffeeAPI import get_swap_route, get_prepared_transaction
+from SwapCoffeeAPI import get_swap_route, get_prepared_transaction
 from tonutils.tonconnect.models import SendTransactionResponse, Transaction, Message
 
 

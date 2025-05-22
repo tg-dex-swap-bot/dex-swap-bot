@@ -1,5 +1,7 @@
 import base64
 from contextlib import suppress
+import logging
+import traceback
 from typing import List
 import os
 
@@ -12,11 +14,13 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message, C
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.utils.markdown import hide_link, hcode
 from redis.asyncio import Redis
+from aiogram import F
 
-from src.Storage import TCRedisStorage
-from src.TransactionHandler import test_swap_transaction
+from Storage import TCRedisStorage
+from TransactionHandler import test_swap_transaction, get_swap_route, create_swap_transaction
+from SwapCoffeeAPI import get_tokens
 from tonutils.tonconnect import TonConnect
-from tonutils.tonconnect.models import WalletApp, Event, EventError, SendTransactionResponse 
+from tonutils.tonconnect.models import WalletApp, Event, EventError, SendTransactionResponse
 from tonutils.tonconnect.utils.exceptions import TonConnectError, UserRejectsError, RequestTimeoutError
 from tonutils.wallet.messages import TransferMessage
 from aiogram.fsm.state import State, StatesGroup
@@ -28,6 +32,7 @@ from aiogram.fsm.state import State, StatesGroup
 BOT_TOKEN = os.getenv("BOT_API_KEY")
 REDIS_DSN = os.getenv("REDIS_DSN")
 TC_MANIFEST_URL = "https://raw.githubusercontent.com/tg-dex-swap-bot/tonconnect-manifest/refs/heads/main/tonconnect-manifest.json"
+TOKENS = {}
 
 redis = Redis.from_url(url=REDIS_DSN)
 dp = Dispatcher(storage=RedisStorage(redis))
@@ -44,6 +49,10 @@ class SwapStates(StatesGroup):
     setting_slippage = State()
     setting_max_splits = State()
     setting_max_length = State()
+    token1 = State()
+    token2 = State()
+    amount = State()
+    directiom = State()
 
 
 # ----------------------------
@@ -61,8 +70,22 @@ async def delete_last_message(user_id: int, message_id: int) -> None:
 
 
 async def _is_valid_token(token: str) -> bool:
-    VALID_TOKENS = {"TON", "USDT", "USDC", "BTC", "ETH"}
-    return token.upper() in VALID_TOKENS
+    return token in TOKENS
+
+
+def _load_tokens():
+    global TOKENS
+    try:
+        tokens_list = get_tokens()
+        TOKENS = {
+            token["metadata"]["symbol"]: token["address"]["address"]
+            for token in tokens_list
+            if token["address"]["address"]
+        }
+        print(f"Loaded {len(TOKENS)} tokens.")
+    except Exception as e:
+        print(f"Failed to load tokens: {e}")
+        TOKENS = {}
 
 
 # ----------------------------
@@ -96,17 +119,9 @@ def _confirm_transaction_markup(url: str, wallet_name: str) -> InlineKeyboardMar
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text=f"Open {wallet_name}", url=url)],
-            [InlineKeyboardButton(text=f"Cancel", callback_data="cancel_transaction")],
+            [InlineKeyboardButton(text="Cancel", callback_data="cancel_transaction")],
         ]
     )
-
-
-def _choose_action_markup() -> InlineKeyboardMarkup:
-    builder = InlineKeyboardBuilder()
-    builder.row(InlineKeyboardButton(text="Send transaction", callback_data="send_transaction"))
-    builder.row(InlineKeyboardButton(text="Send batch transaction", callback_data="send_batch_transaction"))
-    builder.row(InlineKeyboardButton(text="Disconnect wallet", callback_data="disconnect_wallet"))
-    return builder.as_markup()
 
 
 def _go_to_main_menu_markup() -> InlineKeyboardMarkup:
@@ -117,7 +132,11 @@ def _go_to_main_menu_markup() -> InlineKeyboardMarkup:
 
 def _swap_menu_markup() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
-    builder.row(InlineKeyboardButton(text="Build root", callback_data="build_root"))
+    builder.row(InlineKeyboardButton(text="Build route", callback_data="build_route"))
+    builder.row(InlineKeyboardButton(text="Token 1", callback_data="edit_token1"))
+    builder.row(InlineKeyboardButton(text="Token 2", callback_data="edit_token2"))
+    builder.row(InlineKeyboardButton(text="Amount", callback_data="edit_amount"))
+    builder.row(InlineKeyboardButton(text="Direction", callback_data="edit_direction"))
     builder.row(InlineKeyboardButton(text="Options", callback_data="swap_options"))
     builder.row(InlineKeyboardButton(text="Cancel", callback_data="cancel"))
     return builder.as_markup()
@@ -134,7 +153,7 @@ def _swap_options_markup() -> InlineKeyboardMarkup:
 
 def _main_menu_markup() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
-    builder.row(InlineKeyboardButton(text="Swap", callback_data="swap_input"))
+    builder.row(InlineKeyboardButton(text="Swap", callback_data="swap_menu"))
     builder.row(InlineKeyboardButton(text="Options", callback_data="swap_options"))
     builder.row(InlineKeyboardButton(text="Disconnect wallet", callback_data="disconnect_wallet"))
     return builder.as_markup()
@@ -143,6 +162,16 @@ def _main_menu_markup() -> InlineKeyboardMarkup:
 def _cancel_markup() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.row(InlineKeyboardButton(text="Cancel", callback_data="cancel"))
+    return builder.as_markup()
+
+
+def _confirm_build_route_markup() -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(text="Confirm transaction", callback_data="confirm_transaction"),
+        InlineKeyboardButton(text="Cancel", callback_data="cancel"),
+        width=2,
+    )
     return builder.as_markup()
 
 
@@ -172,13 +201,15 @@ async def connect_wallet_window(state: FSMContext, user_id: int) -> None:
     await delete_last_message(user_id, message.message_id)
 
 
-async def wallet_connected_window(user_id: int) -> None:
+async def wallet_connected_window(user_id: int, state: FSMContext) -> None:
     connector = await tc.init_connector(user_id)
     wallet_address = connector.wallet.account.address.to_str(is_bounceable=False)
 
     reply_markup = _main_menu_markup()
     text = f"Connected wallet:\n{hcode(wallet_address)}\n\nChoose an action:"
-    
+
+    await state.update_data(back_state="main_menu")
+
     message = await bot.send_message(chat_id=user_id, text=text, reply_markup=reply_markup)
     await delete_last_message(user_id, message.message_id)
 
@@ -211,27 +242,29 @@ async def transaction_sent_window(user_id: int, transaction: SendTransactionResp
 async def error_window(user_id: int, message_text: str, button_text: str, callback_data: str) -> None:
     builder = InlineKeyboardBuilder()
     builder.row(InlineKeyboardButton(text=button_text, callback_data=callback_data))
+    builder.row(InlineKeyboardButton(text="Cancel", callback_data="cancel"))
     reply_markup = builder.as_markup()
 
     message = await bot.send_message(chat_id=user_id, text=message_text, reply_markup=reply_markup)
     await delete_last_message(user_id, message.message_id)
 
 
-async def swap_input_window(user_id: int, state: FSMContext) -> None:
-    text = "Enter tokens and amount in the format: <code>TOKEN1 TOKEN2 AMOUNT</code>\n" "Example: <code>USDT TON 10.5</code>"
-    reply_markup = _cancel_markup()
-    msg = await bot.send_message(chat_id=user_id, text=text, reply_markup=reply_markup)
-    await delete_last_message(user_id, msg.message_id)
-    await state.set_state(SwapStates.waiting_input)
-
-
 async def swap_menu_window(user_id: int, state: FSMContext) -> None:
     data = await state.get_data()
-    token1 = data["token1"]
-    token2 = data["token2"]
-    amount = data["amount"]
+    token1 = data.get("token1", "N/A")
+    token2 = data.get("token2", "N/A")
+    amount = data.get("amount", "N/A")
+    direction = data.get("direction", "input")
 
-    text = f"<b>Swap:</b> <code>{token1}</code> → <code>{token2}</code>\n" f"<b>Amount:</b> {amount}"
+    if direction == "input":
+        direction_text = f"Amount to send ({token1})"
+    else:
+        direction_text = f"Amount to receive ({token2})"
+
+    text = (
+        f"<b>Swap:</b> <code>{token1}</code> → <code>{token2}</code>\n"
+        f"<b>{direction_text}:</b> {amount}"
+    )
 
     await state.update_data(back_state="swap_menu")
 
@@ -263,18 +296,19 @@ async def swap_options_window(user_id: int, state: FSMContext) -> None:
 # ----------------------------
 @tc.on_event(Event.CONNECT)
 async def connect_event(user_id: int) -> None:
-    await wallet_connected_window(user_id)
+    state = dp.fsm.resolve_context(bot, user_id, user_id)
+    await wallet_connected_window(user_id, state)
 
 
 @tc.on_event(EventError.CONNECT)
 async def connect_error_event(error: TonConnectError, user_id: int) -> None:
     button_text, callback_data = "Try again", "connect_wallet"
     if isinstance(error, UserRejectsError):
-        message_text = f"You rejected the wallet connection."
+        message_text = "You rejected the wallet connection."
     elif isinstance(error, RequestTimeoutError):
-        message_text = f"Connection request timed out."
+        message_text = "Connection request timed out."
     else:
-        message_text = f"Connection error. Error: {error.message}"
+        message_text = "Connection error. Error: {error.message}"
     await error_window(user_id, message_text, button_text, callback_data)
 
 
@@ -288,11 +322,11 @@ async def disconnect_event(user_id: int) -> None:
 async def disconnect_error_event(error: TonConnectError, user_id: int) -> None:
     button_text, callback_data = "Try again", "connect_wallet"
     if isinstance(error, UserRejectsError):
-        message_text = f"You rejected the wallet disconnection."
+        message_text = "You rejected the wallet disconnection."
     elif isinstance(error, RequestTimeoutError):
-        message_text = f"Disconnect request timed out."
+        message_text = "Disconnect request timed out."
     else:
-        message_text = f"Disconnect error. Error: {error.message}"
+        message_text = "Disconnect error. Error: {error.message}"
 
     await error_window(user_id, message_text, button_text, callback_data)
 
@@ -306,11 +340,11 @@ async def transaction_event(user_id: int, transaction: SendTransactionResponse) 
 async def transaction_error_event(error: TonConnectError, user_id: int) -> None:
     button_text, callback_data = "Try again", "main_menu"
     if isinstance(error, UserRejectsError):
-        message_text = f"You rejected the transaction."
+        message_text = "You rejected the transaction."
     elif isinstance(error, RequestTimeoutError):
-        message_text = f"Transaction request timed out."
+        message_text = "Transaction request timed out."
     else:
-        message_text = f"Transaction error. Error: {error.message}"
+        message_text = "Transaction error. Error: {error.message}"
 
     await error_window(user_id, message_text, button_text, callback_data)
 
@@ -318,6 +352,73 @@ async def transaction_error_event(error: TonConnectError, user_id: int) -> None:
 # ----------------------------
 # Bot Command, Input and Callback Handlers
 # ----------------------------
+@dp.callback_query(F.data == "edit_token1")
+async def edit_token1_handler(callback: CallbackQuery, state: FSMContext):
+    await callback.message.answer("Enter Token 1 symbol (e.g. TON):")
+    await state.set_state(SwapStates.token1)
+    await callback.answer()
+
+
+@dp.message(SwapStates.token1)
+async def token1_input_handler(message: Message, state: FSMContext):
+    token = message.text.strip().upper()
+    if not await _is_valid_token(token):
+        await message.answer("Invalid token symbol. Please try again.")
+        return
+    await state.update_data(token1=token)
+    await swap_menu_window(message.from_user.id, state)
+    await state.set_state(None)
+
+
+@dp.callback_query(F.data == "edit_token2")
+async def edit_token2_handler(callback: CallbackQuery, state: FSMContext):
+    await callback.message.answer("Enter Token 2 symbol (e.g. USDT):")
+    await state.set_state(SwapStates.token2)
+    await callback.answer()
+
+
+@dp.message(SwapStates.token2)
+async def token2_input_handler(message: Message, state: FSMContext):
+    token = message.text.strip().upper()
+    if not await _is_valid_token(token):
+        await message.answer("Invalid token symbol. Please try again.")
+        return
+    await state.update_data(token2=token)
+    await swap_menu_window(message.from_user.id, state)
+    await state.set_state(None)
+
+
+@dp.callback_query(F.data == "edit_amount")
+async def edit_amount_handler(callback: CallbackQuery, state: FSMContext):
+    await callback.message.answer("Enter amount (number):")
+    await state.set_state(SwapStates.amount)
+    await callback.answer()
+
+
+@dp.message(SwapStates.amount)
+async def amount_input_handler(message: Message, state: FSMContext):
+    try:
+        amount = float(message.text.strip())
+        if amount <= 0:
+            raise ValueError
+    except ValueError:
+        await message.answer("Invalid amount. Please enter a positive number.")
+        return
+    await state.update_data(amount=str(amount))
+    await swap_menu_window(message.from_user.id, state)
+    await state.set_state(None)
+
+
+@dp.callback_query(F.data == "edit_direction")
+async def edit_direction_handler(callback: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    current = data.get("direction", "input")
+    new_direction = "output" if current == "input" else "input"
+    await state.update_data(direction=new_direction)
+    await swap_menu_window(callback.from_user.id, state)
+    await callback.answer(f"Direction switched to: {'Amount to receive' if new_direction == 'to' else 'Amount to send'}")
+
+
 @dp.message(CommandStart())
 async def start_command(message: Message, state: FSMContext) -> None:
     connector = await tc.init_connector(message.from_user.id)
@@ -328,7 +429,8 @@ async def start_command(message: Message, state: FSMContext) -> None:
     if not connector.connected:
         await connect_wallet_window(state, message.from_user.id)
     else:
-        await wallet_connected_window(message.from_user.id)
+        await wallet_connected_window(message.from_user.id, state)
+
 
 @dp.message(Command("test"))
 async def test_command(message: Message):
@@ -341,6 +443,7 @@ async def test_command(message: Message):
         await message.answer(f"Test swap initiated. Result: {result}")
     except Exception as e:
         await message.answer(f"Error during test swap: {str(e)}")
+
 
 @dp.message(SwapStates.setting_slippage)
 async def set_slippage(message: Message, state: FSMContext):
@@ -395,50 +498,68 @@ async def set_max_length(message: Message, state: FSMContext):
             "Try again",
             "set_max_length",
         )
-        return 
+        return
     await swap_options_window(message.from_user.id, state)
 
 
-@dp.message(SwapStates.waiting_input)
-async def handle_swap_input(message: Message, state: FSMContext) -> None:
-    parts = message.text.strip().split()
+@dp.callback_query(F.data == "build_route")
+async def build_route_handler(callback_query: CallbackQuery, state: FSMContext):
+    await callback_query.answer()
 
-    if len(parts) != 3:
-        await error_window(
-            message.from_user.id,
-            "Invalid format.\nUse: <code>TOKEN1 TOKEN2 AMOUNT</code>\nExample: <code>USDT TON 10.5</code>",
-            "Try again",
-            "swap_input",
-        )
-        return
+    data = await state.get_data()
+    input_token = TOKENS.get(data.get("token1"))
+    output_token = TOKENS.get(data.get("token2"))
+    amount = float(data.get("amount"))
+    direction = data.get("direction", "input")
 
-    token1, token2, amount_str = map(str.upper, parts)
+    is_input = True if direction == "input" else False
 
-    for token in (token1, token2):
-        if not await _is_valid_token(token):
-            await error_window(
-                message.from_user.id,
-                f"Token <code>{token}</code> is not supported.",
-                "Try again",
-                "swap_input",
-            )
-            return
+    route = get_swap_route(input_token, output_token, amount, is_input)
 
+    input_symbol = route["input_token"]["metadata"]["symbol"]
+    output_symbol = route["output_token"]["metadata"]["symbol"]
+    input_amount = route["input_amount"]
+    output_amount = route["output_amount"]
+    price_impact = route["price_impact"]
+    cashback = route["estimated_cashback_usd"]
+    savings = route["savings"]
+
+    response = (
+        f"🔁 <b>Swap Route:</b>\n"
+        f"<b>From:</b> {input_symbol}\n"
+        f"<b>To:</b> {output_symbol}\n"
+        f"<b>Input Amount:</b> {input_amount}\n"
+        f"<b>Output Amount:</b> {output_amount}\n"
+        f"<b>Price Impact:</b> {price_impact}%\n"
+        f"<b>Estimated Cashback:</b> ${cashback}\n"
+        f"<b>Savings:</b> ${savings}"
+    )
+
+    await state.update_data(route=route)
+
+    await bot.send_message(callback_query.from_user.id, response, reply_markup=_confirm_build_route_markup(), parse_mode="HTML")
+
+
+@dp.callback_query(F.data == "confirm_transaction")
+async def confirm_transaction_handler(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+
+    data = await state.get_data()
+    connector = await tc.init_connector(callback.from_user.id)
     try:
-        amount = float(amount_str)
-        if amount <= 0:
-            raise ValueError
-    except ValueError:
-        await error_window(
-            message.from_user.id,
-            "Amount must be a positive number.\nExample: <code>USDT TON 10.5</code>",
-            "Try again",
-            "swap_input",
-        )
-        return
-
-    await state.update_data(token1=token1, token2=token2, amount=amount)
-    await swap_menu_window(message.from_user.id, state)
+        transaction = await create_swap_transaction(
+            connector=connector,
+            sender_address=connector.wallet.account.address.to_str(is_bounceable=False),
+            route=data.get("route"))
+       
+        if transaction:
+            await error_window(callback.from_user.id, "Transaction was sent.", "Back", "swap_menu")    
+        else:
+            await error_window(callback.from_user.id, "Transaction was not sent.", "Back", "swap_menu")
+   
+    except Exception as e:
+        logging.error("Transaction error:\n%s", traceback.format_exc())
+        await error_window(callback.from_user.id, f"Error: {e}", "Back", "swap_menu")
 
 
 @dp.callback_query()
@@ -451,8 +572,7 @@ async def callback_query_handler(callback_query: CallbackQuery, state: FSMContex
         await state.update_data(selected_wallet=data.split(":")[1])
         await connect_wallet_window(state, callback_query.from_user.id)
     elif data == "main_menu":
-        await state.update_data(back_state="main_menu")
-        await wallet_connected_window(callback_query.from_user.id)
+        await wallet_connected_window(callback_query.from_user.id, state)
     elif data == "connect_wallet":
         await connect_wallet_window(state, callback_query.from_user.id)
     elif data == "disconnect_wallet":
@@ -461,8 +581,7 @@ async def callback_query_handler(callback_query: CallbackQuery, state: FSMContex
     elif data == "cancel_transaction":
         if connector.is_transaction_pending(rpc_request_id):
             connector.cancel_pending_transaction(rpc_request_id)
-        await state.update_data(back_state="main_menu")
-        await wallet_connected_window(callback_query.from_user.id)
+        await wallet_connected_window(callback_query.from_user.id, state)
     elif data == "send_transaction":
         rpc_request_id = await connector.send_transfer(
             destination=connector.account.address,
@@ -483,12 +602,12 @@ async def callback_query_handler(callback_query: CallbackQuery, state: FSMContex
         rpc_request_id = await connector.send_batch_transfer(messages)
         await send_transaction_window(callback_query.from_user.id)
         await state.update_data(rpc_request_id=rpc_request_id)
-    elif callback_query.data == "swap_input":
-        await swap_input_window(callback_query.from_user.id, state)
+    elif callback_query.data == "swap_menu":
+        await swap_menu_window(callback_query.from_user.id, state)
     elif data == "cancel":
         with suppress(Exception):
             await bot.delete_message(chat_id=callback_query.from_user.id, message_id=callback_query.message.message_id)
-        await wallet_connected_window(callback_query.from_user.id)
+        await wallet_connected_window(callback_query.from_user.id, state)
     elif data == "swap_options":
         await swap_options_window(callback_query.from_user.id, state)
     elif data == "set_slippage":
@@ -507,8 +626,7 @@ async def callback_query_handler(callback_query: CallbackQuery, state: FSMContex
         if back_state == "swap_menu":
             await swap_menu_window(callback_query.from_user.id, state)
         else:
-            await wallet_connected_window(callback_query.from_user.id)
-
+            await wallet_connected_window(callback_query.from_user.id, state)
 
     await callback_query.answer()
 
@@ -517,6 +635,7 @@ async def callback_query_handler(callback_query: CallbackQuery, state: FSMContex
 # Main Entry Point
 # ----------------------------
 async def main():
+    _load_tokens()
     await dp.start_polling(bot)
 
 
