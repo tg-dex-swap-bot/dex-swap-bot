@@ -5,7 +5,7 @@ import os
 
 from aiogram import Dispatcher, Bot
 from aiogram.client.default import DefaultBotProperties
-from aiogram.filters import CommandStart
+from aiogram.filters import CommandStart, Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.storage.redis import RedisStorage
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message, CallbackQuery
@@ -14,8 +14,9 @@ from aiogram.utils.markdown import hide_link, hcode
 from redis.asyncio import Redis
 
 from src.Storage import TCRedisStorage
+from src.TransactionHandler import test_swap_transaction
 from tonutils.tonconnect import TonConnect
-from tonutils.tonconnect.models import WalletApp, Event, EventError, SendTransactionResponse
+from tonutils.tonconnect.models import WalletApp, Event, EventError, SendTransactionResponse 
 from tonutils.tonconnect.utils.exceptions import TonConnectError, UserRejectsError, RequestTimeoutError
 from tonutils.wallet.messages import TransferMessage
 
@@ -227,6 +228,17 @@ async def start_command(message: Message, state: FSMContext) -> None:
     else:
         await wallet_connected_window(message.from_user.id)
 
+@dp.message(Command("test"))
+async def test_command(message: Message):
+    try:
+        connector = await tc.init_connector(message.from_user.id)
+        if not connector.connected:
+            await message.answer("Please connect your wallet first using /start")
+            return
+        result = await test_swap_transaction(connector)
+        await message.answer(f"Test swap initiated. Result: {result}")
+    except Exception as e:
+        await message.answer(f"Error during test swap: {str(e)}")
 
 @dp.callback_query()
 async def callback_query_handler(callback_query: CallbackQuery, state: FSMContext) -> None:
