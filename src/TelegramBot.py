@@ -14,7 +14,7 @@ from aiogram.utils.markdown import hide_link, hcode
 from redis.asyncio import Redis
 
 from src.Storage import TCRedisStorage
-from src.TransactionHandler import test_initiate_swap
+from src.TransactionHandler import test_swap_transaction
 from tonutils.tonconnect import TonConnect
 from tonutils.tonconnect.models import WalletApp, Event, EventError, SendTransactionResponse 
 from tonutils.tonconnect.utils.exceptions import TonConnectError, UserRejectsError, RequestTimeoutError
@@ -235,9 +235,7 @@ async def test_command(message: Message):
         if not connector.connected:
             await message.answer("Please connect your wallet first using /start")
             return
-            
-        result = await test_initiate_swap(connector)
-        await send_transaction_window(message.from_user.id)
+        result = await test_swap_transaction(connector)
         await message.answer(f"Test swap initiated. Result: {result}")
     except Exception as e:
         await message.answer(f"Error during test swap: {str(e)}")

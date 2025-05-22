@@ -1,51 +1,40 @@
 from typing import Optional
 from decimal import Decimal
+import time
 
 from src.SwapCoffeeAPI import get_swap_route, get_prepared_transaction
-from tonutils.tonconnect.models import SendTransactionResponse
-from tonutils.tonconnect.models import Transaction, Message
-import time
-async def initiate_swap_transaction(
+from tonutils.tonconnect.models import SendTransactionResponse, Transaction, Message
+
+
+class TransactionException(Exception):
+    """Base exception for transaction-related errors"""
+    pass
+
+
+async def create_swap_transaction(
     connector,
     sender_address: str,
-    input_token_address: str,
-    output_token_address: str,
-    amount: Decimal,
+    route: dict,
     slippage: float = 0.05,
-    is_input_amount: bool = True,
     mev_protection: bool = True
 ) -> Optional[SendTransactionResponse]:
     """
-    Инициирует транзакцию свопа между токенами через кошелек.
+    Создает и отправляет транзакцию свопа.
 
     Args:
-        connector: Инициализированный коннектор к TON кошельку
-        sender_address (str): Адрес отправителя (кошелька)
-        input_token_address (str): Адрес входного токена
-        output_token_address (str): Адрес выходного токена
-        amount (Decimal): Объем транзакции
-        slippage (float): Максимальное проскальзывание цены (по умолчанию 5%)
-        is_input_amount (bool): True если amount - это количество входного токена, 
-                              False если amount - это желаемое количество выходного токена
-        mev_protection (bool): Использовать ли защиту от MEV (по умолчанию True)
+        connector: Объект соединения с TON-кошельком.
+        sender_address (str): Адрес отправителя.
+        route (dict): Ответ от CoffeeAPI о маршруте транзакции.
+        slippage (float): Допустимое проскальзывание.
+        mev_protection (bool): Флаг защиты от MEV-атак.
 
     Returns:
-        Optional[SendTransactionResponse]: Ответ от транзакции если успешно, None если произошла ошибка
+        Optional[SendTransactionResponse]: Ответ от кошелька.
 
     Raises:
-        SwapCoffeeException: Если произошла ошибка при получении маршрута или подготовке транзакции
-        TonConnectError: Если произошла ошибка при взаимодействии с кошельком
+        TransactionException: Если произошла ошибка при создании транзакции
     """
     try:
-        # Получаем оптимальный маршрут для свопа
-        route = get_swap_route(
-            input_token_address,
-            output_token_address,
-            float(amount),
-            is_input_amount
-        )
-
-        # Подготавливаем транзакцию
         prepared_transaction = get_prepared_transaction(
             sender_address,
             slippage,
@@ -53,51 +42,62 @@ async def initiate_swap_transaction(
             mev_protection
         )
 
-        # Отправляем транзакцию через кошелек
         tx_data = prepared_transaction["transactions"][0]
         message = Message(
             address=tx_data["address"],
             amount=str(tx_data["value"]),
-            payload=tx_data["cell"],
-            state_init=tx_data.get("stateInit")  # Используем .get(), чтобы избежать KeyError
+            payload=str(tx_data["cell"])
         )
-        rpc_request_id = await connector.send_transaction(
-            transaction=Transaction(
-                valid_until=int(time.time()) + 600,
-                messages=[message]  # Передаём объект. Кстати, batch-send будет всего лишь листом из message.
-            )
+
+        tx = Transaction(
+            valid_until=int(time.time()) + 600,
+            messages=[message]
         )
-        return rpc_request_id
+
+        response = await connector.send_transaction(tx)
+        return response
 
     except Exception as e:
-        print(f"Ошибка при инициации транзакции: {str(e)}")
-        return None 
+        raise TransactionException(f"Ошибка при создании транзакции: {str(e)}")
 
-async def test_initiate_swap(connector):
-    """Тестовая функция для проверки инициации транзакции"""
+
+async def test_swap_transaction(connector) -> Optional[SendTransactionResponse]:
+    """
+    Тестовая функция для выполнения свопа с заданными тестовыми параметрами.
+
+    Returns:
+        Optional[SendTransactionResponse]: Ответ от кошелька или None.
+
+    Raises:
+        TransactionException: Если произошла ошибка при выполнении теста
+    """
     try:
-        # Тестовые данные
-        test_sender = "UQCf_BAw_HyPyF1YMNT_jQLHYbPGaKAQcaAyoMjx2qdAy2wb"
-        input_token = "EQCxE6mUtQJKFnGfaROTKOt1lZbDiiX1kCixRv7Nw2Id_sDs"
+        print("Запуск тестовой транзакции...")
+
+        sender_address = "UQCf_BAw_HyPyF1YMNT_jQLHYbPGaKAQcaAyoMjx2qdAy2wb"
+        input_token = "EQCvxJy4eG8hyHBFsZ7eePxrRsUQSFE_jpptRAYBmcG_DOGS"
         output_token = "EQB420yQsZobGcy0VYDfSKHpG2QQlw-j1f_tPu1J488I__PX"
         amount = Decimal("1.0")
-        
-        print("Запуск теста инициации транзакции...")
-        result = await initiate_swap_transaction(
-            connector=connector,
-            sender_address=test_sender,
-            input_token_address=input_token,
-            output_token_address=output_token,
-            amount=amount
+
+        route = get_swap_route(
+            input_token,
+            output_token,
+            float(amount),
+            is_input=True
         )
-        
+
+        result = await create_swap_transaction(
+            connector=connector,
+            sender_address=sender_address,
+            route=route
+        )
+
         if result:
             print(f"Тест успешен! Результат: {result}")
-            return result
         else:
-            print("Тест завершился с None результатом")
-            return None
-            
+            print("Тест завершился безуспешно (None).")
+
+        return result
+
     except Exception as e:
-        print(f"Ошибка при тестировании: {str(e)}")
-        raise
+        raise TransactionException(f"Ошибка при выполнении теста: {str(e)}")
