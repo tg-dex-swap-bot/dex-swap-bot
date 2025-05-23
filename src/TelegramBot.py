@@ -519,7 +519,7 @@ async def build_route_handler(callback_query: CallbackQuery, state: FSMContext):
     max_length = data.get("max_length")
 
     is_input = True if direction == "input" else False
-    route = get_swap_route(input_token, output_token, amount, is_input)
+    route = get_swap_route(input_token, output_token, amount, max_splits, max_length, is_input)
     
     if not route.get("paths"):
         await delete_last_message(callback_query.from_user.id, (await dp.fsm.resolve_context(bot, callback_query.from_user.id, callback_query.from_user.id).get_data()).get("last_message_id"))
