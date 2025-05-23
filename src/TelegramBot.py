@@ -593,9 +593,15 @@ async def build_route_handler(callback_query: CallbackQuery, state: FSMContext):
         f"<b>Route Path:</b>\n{route_details}"
     )
 
-    await state.update_data(route=route)
+    msg = await bot.send_message(
+        callback_query.from_user.id,
+        response,
+        reply_markup=_confirm_build_route_markup(),
+        parse_mode="HTML"
+    )
 
-    await bot.send_message(callback_query.from_user.id, response, reply_markup=_confirm_build_route_markup(), parse_mode="HTML")
+    await state.update_data(back_state="route_window")
+    await state.update_data(last_message_id=msg.message_id)
 
 
 @dp.callback_query(F.data == "confirm_transaction")
@@ -692,6 +698,15 @@ async def callback_query_handler(callback_query: CallbackQuery, state: FSMContex
             await wallet_connected_window(callback_query.from_user.id, state)
             await state.set_state(SwapStates.waiting_for_swap_text)
         
+        # Если возвращаемся из меню маршрута
+        elif state_data.get("back_state") == "route_window":
+            await callback_query.answer()
+            data = await state.get_data()
+            last_msg_id = data.get("last_message_id")
+            if last_msg_id:
+                await delete_last_message(callback_query.from_user.id, last_msg_id)
+            await state.set_state(SwapStates.waiting_for_swap_text)
+
         # Если возвращаемся из меню опций
         elif previous_state == "SwapStates:waiting_for_swap_text":
             await wallet_connected_window(callback_query.from_user.id, state)
