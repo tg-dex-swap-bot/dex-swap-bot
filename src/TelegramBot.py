@@ -4,7 +4,9 @@ import logging
 import traceback
 from typing import List
 import os
+import json
 
+from mistralai import Mistral
 from aiogram import Dispatcher, Bot
 from aiogram.client.default import DefaultBotProperties
 from aiogram.filters import CommandStart, Command
@@ -15,7 +17,6 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.utils.markdown import hide_link, hcode
 from redis.asyncio import Redis
 from aiogram import F
-
 from Storage import TCRedisStorage
 from TransactionHandler import test_swap_transaction, get_swap_route, create_swap_transaction
 from SwapCoffeeAPI import get_tokens
@@ -33,6 +34,7 @@ BOT_TOKEN = os.getenv("BOT_API_KEY")
 REDIS_DSN = os.getenv("REDIS_DSN")
 TC_MANIFEST_URL = "https://raw.githubusercontent.com/tg-dex-swap-bot/tonconnect-manifest/refs/heads/main/tonconnect-manifest.json"
 TOKENS = {}
+client = Mistral(api_key=os.getenv("MISTRAL_API"))
 
 redis = Redis.from_url(url=REDIS_DSN)
 dp = Dispatcher(storage=RedisStorage(redis))
@@ -52,6 +54,7 @@ class SwapStates(StatesGroup):
     token2 = State()
     amount = State()
     directiom = State()
+    waiting_for_swap_text = State()
 
 
 # ----------------------------
@@ -516,9 +519,8 @@ async def build_route_handler(callback_query: CallbackQuery, state: FSMContext):
     max_length = data.get("max_length")
 
     is_input = True if direction == "input" else False
-
-    route = get_swap_route(input_token, output_token, amount, max_splits, max_length, is_input)
-
+    route = get_swap_route(input_token, output_token, amount, is_input)
+    
     if not route.get("paths"):
         await delete_last_message(callback_query.from_user.id, (await dp.fsm.resolve_context(bot, callback_query.from_user.id, callback_query.from_user.id).get_data()).get("last_message_id"))
         msg = await bot.send_message(
@@ -592,6 +594,7 @@ async def callback_query_handler(callback_query: CallbackQuery, state: FSMContex
     connector = await tc.init_connector(callback_query.from_user.id)
     rpc_request_id = (await state.get_data()).get("rpc_request_id")
     data = callback_query.data
+    current_state = await state.get_state()
 
     if data.startswith("app_wallet:"):
         await state.update_data(selected_wallet=data.split(":")[1])
@@ -634,6 +637,7 @@ async def callback_query_handler(callback_query: CallbackQuery, state: FSMContex
             await bot.delete_message(chat_id=callback_query.from_user.id, message_id=callback_query.message.message_id)
         await wallet_connected_window(callback_query.from_user.id, state)
     elif data == "swap_options":
+        await state.update_data(previous_state=current_state)
         await swap_options_window(callback_query.from_user.id, state)
     elif data == "set_max_splits":
         await state.set_state(SwapStates.setting_max_splits)
@@ -644,16 +648,122 @@ async def callback_query_handler(callback_query: CallbackQuery, state: FSMContex
         msg = await bot.send_message(chat_id=callback_query.from_user.id, text="Enter max length (integer):")
         await state.update_data(prompt_message_id=msg.message_id)
     elif data == "back":
-        back_state = (await state.get_data()).get("back_state")
-        await state.update_data(back_state="clear")
-
-        if back_state == "swap_menu":
+        state_data = await state.get_data()
+        previous_state = state_data.get("previous_state")
+        
+        # Если возвращаемся из настроек Max Splits/Length
+        if current_state in ["SwapStates:setting_max_splits", "SwapStates:setting_max_length"]:
+            await state.set_state(SwapStates.waiting_for_swap_text)
+            await callback_query.message.answer("Continue to enter exchange requests...")
+        
+        # Если возвращаемся из меню опций
+        elif previous_state == "SwapStates:waiting_for_swap_text":
+            await state.set_state(SwapStates.waiting_for_swap_text)
+            await callback_query.message.answer("Continue to enter exchange requests...")
+        
+        # Если возвращаемся из меню обмена
+        elif state_data.get("back_state") == "swap_menu":
             await swap_menu_window(callback_query.from_user.id, state)
+        
+        # Дефолтный случай - возврат в главное меню
         else:
             await wallet_connected_window(callback_query.from_user.id, state)
 
     await callback_query.answer()
 
+@dp.message(Command("swap"))
+async def start_swap_command(message: Message, state: FSMContext):
+    example_text = (
+        "Enter the exchange request in the format:\n"
+        "🔹 <b>Examples:</b>\n"
+        "- Обменять 10 PX на USDT\n"
+        "- Обменять 130 DOGS на NOT\n"
+        "Now ~300 tokens are available. Attention: Exchanges with TON are temporarily unavailable."
+    )
+    
+    await message.answer(example_text, parse_mode="HTML")
+    await state.set_state(SwapStates.waiting_for_swap_text)
+
+
+@dp.message(SwapStates.waiting_for_swap_text)
+async def process_swap_text(message: Message, state: FSMContext):
+    try:
+        user_text = message.text.strip()
+        
+        # Сохраняем оригинальный текст для возможного повторного использования
+        await state.update_data(swap_text=user_text)
+        
+        model = "mistral-large-latest"
+        with open('prompt.txt', 'r', encoding='utf-8') as file:
+            content = file.read().replace('\n', ' ')
+        
+        # Используем текст пользователя вместо фиксированного
+        chat_response = client.chat.complete(
+            model=model,
+            messages=[
+                {
+                    "role": "user",
+                    "content": content + user_text,
+                },
+            ]
+        )
+        
+        response_text = chat_response.choices[0].message.content
+        print(response_text)
+        
+        first_brace = response_text.find('{')
+        last_brace = response_text.rfind('}')
+        if first_brace == -1 or last_brace == -1:
+            raise ValueError("Exchange parameters could not be recognized")
+        
+        json_text = response_text[first_brace:last_brace + 1]
+        data = json.loads(json_text)
+        
+        # Проверяем наличие обязательных полей
+        required_fields = ["input_token", "output_token", "amount"]
+        if not all(field in data for field in required_fields):
+            raise ValueError("Not all required parameters are specified")
+
+        # Проверяем существование токенов в TOKENS
+        input_token = data["input_token"].upper()
+        output_token = data["output_token"].upper()
+        if input_token not in TOKENS or output_token not in TOKENS:
+            raise ValueError("The entered tokens were not recognized")
+
+        # Обновляем состояние
+        await state.update_data(
+            token1=input_token,
+            token2=output_token,
+            amount=str(data["amount"]),
+            direction="input"
+        )
+        
+        # Показываем подтверждение пользователю
+        confirm_text = (
+            f"🔹 <b>Confirm exchange parameters:</b>\n"
+            f"• Giving: {data['amount']} {data['input_token']}\n"
+            f"• Getting: {data['output_token']}\n\n"
+            f"That's right?"
+        )
+        
+        builder = InlineKeyboardBuilder()
+        builder.row(
+            InlineKeyboardButton(text="✅ Yeah, let's go!", callback_data="build_route"),
+            InlineKeyboardButton(text="❌ Nah, we're changing", callback_data="cancel"),
+            width=2
+        )
+        
+        await message.answer(confirm_text, reply_markup=builder.as_markup(), parse_mode="HTML")
+        
+    except json.JSONDecodeError:
+        await message.answer("❌ Request processing error. Please use the correct format.")
+        await start_swap_command(message, state)
+    except ValueError as e:
+        await message.answer(f"❌ Error: {str(e)}")
+        await start_swap_command(message, state)
+    except Exception as e:
+        await message.answer("❌ An unexpected error has occurred. Please try again.")
+        await start_swap_command(message, state)
 
 # ----------------------------
 # Main Entry Point
