@@ -50,6 +50,7 @@ class SwapStates(StatesGroup):
     waiting_input = State()
     setting_max_splits = State()
     setting_max_length = State()
+    setting_slippage = State()
     token1 = State()
     token2 = State()
     amount = State()
@@ -149,6 +150,7 @@ async def _swap_menu_markup(direction: str = "input") -> InlineKeyboardMarkup:
 
 def _swap_options_markup() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
+    builder.row(InlineKeyboardButton(text="Slippage", callback_data="set_slippage"))
     builder.row(InlineKeyboardButton(text="Max Splits", callback_data="set_max_splits"))
     builder.row(InlineKeyboardButton(text="Max Length", callback_data="set_max_length"))
     builder.row(InlineKeyboardButton(text="Back", callback_data="back"))
@@ -279,11 +281,13 @@ async def swap_menu_window(user_id: int, state: FSMContext) -> None:
 
 async def swap_options_window(user_id: int, state: FSMContext) -> None:
     data = await state.get_data()
+    slippage = data.get("slippage", 0.05)
     max_splits = data.get("max_splits", 1)
     max_length = data.get("max_length", 2)
 
     text = (
         f"<b>Options:</b>\n"
+        f"• Slippage: <code>{slippage}</code>\n"
         f"• Max Splits: <code>{max_splits}</code>\n"
         f"• Max Length: <code>{max_length}</code>"
     )
@@ -507,6 +511,31 @@ async def set_max_length(message: Message, state: FSMContext):
     await swap_options_window(message.from_user.id, state)
 
 
+@dp.message(SwapStates.setting_slippage)
+async def set_slippage(message: Message, state: FSMContext):
+    data = await state.get_data()
+    prompt_id = data.get("prompt_message_id")
+    if prompt_id:
+        with suppress(Exception):
+            await bot.delete_message(chat_id=message.chat.id, message_id=prompt_id)
+
+    try:
+        value = float(message.text.strip())
+        if value < 0 or value > 1:
+            raise ValueError
+        await state.update_data(slippage=value)
+        await message.answer(f"✅ Slippage set to {value}")
+    except ValueError:
+        await error_window(
+            message.from_user.id,
+            "❌ Invalid value. Should be a number from 0 to 1",
+            "Try again",
+            "set_slippage",
+        )
+        return
+    await swap_options_window(message.from_user.id, state)
+
+
 @dp.callback_query(F.data == "build_route")
 async def build_route_handler(callback_query: CallbackQuery, state: FSMContext):
     await callback_query.answer()
@@ -577,7 +606,8 @@ async def confirm_transaction_handler(callback: CallbackQuery, state: FSMContext
         transaction = await create_swap_transaction(
             connector=connector,
             sender_address=connector.wallet.account.address.to_str(is_bounceable=False),
-            route=data.get("route"))
+            route=data.get("route"),
+            slippage=data.get("slippage"))
 
         if transaction is not None:
             await send_transaction_window(callback.from_user.id)
@@ -646,6 +676,10 @@ async def callback_query_handler(callback_query: CallbackQuery, state: FSMContex
     elif data == "set_max_length":
         await state.set_state(SwapStates.setting_max_length)
         msg = await bot.send_message(chat_id=callback_query.from_user.id, text="Enter max length (integer):")
+        await state.update_data(prompt_message_id=msg.message_id)
+    elif data == "set_slippage":
+        await state.set_state(SwapStates.setting_slippage)
+        msg = await bot.send_message(chat_id=callback_query.from_user.id, text="Enter slippage value (float from 0 to 1):")
         await state.update_data(prompt_message_id=msg.message_id)
     elif data == "back":
         state_data = await state.get_data()
