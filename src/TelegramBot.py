@@ -257,6 +257,8 @@ async def error_window(user_id: int, message_text: str, button_text: str, callba
 
 async def swap_menu_window(user_id: int, state: FSMContext) -> None:
     data = await state.get_data()
+    if "slippage" not in data:
+        await state.update_data(slippage=0.05)
     token1 = data.get("token1", "N/A")
     token2 = data.get("token2", "N/A")
     amount = data.get("amount", "N/A")
@@ -687,13 +689,13 @@ async def callback_query_handler(callback_query: CallbackQuery, state: FSMContex
         
         # Если возвращаемся из настроек Max Splits/Length
         if current_state in ["SwapStates:setting_max_splits", "SwapStates:setting_max_length"]:
+            await wallet_connected_window(callback_query.from_user.id, state)
             await state.set_state(SwapStates.waiting_for_swap_text)
-            await callback_query.message.answer("Continue to enter exchange requests...")
         
         # Если возвращаемся из меню опций
         elif previous_state == "SwapStates:waiting_for_swap_text":
+            await wallet_connected_window(callback_query.from_user.id, state)
             await state.set_state(SwapStates.waiting_for_swap_text)
-            await callback_query.message.answer("Continue to enter exchange requests...")
         
         # Если возвращаемся из меню обмена
         elif state_data.get("back_state") == "swap_menu":
@@ -702,6 +704,8 @@ async def callback_query_handler(callback_query: CallbackQuery, state: FSMContex
         # Дефолтный случай - возврат в главное меню
         else:
             await wallet_connected_window(callback_query.from_user.id, state)
+        
+        # Открываем начальное меню
 
     await callback_query.answer()
 

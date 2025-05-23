@@ -55,7 +55,6 @@ async def create_swap_transaction(
         )
 
         response = await connector.send_transaction(tx)
-        response = await connector.send_transaction(tx)
         return response
 
     except Exception as e:
