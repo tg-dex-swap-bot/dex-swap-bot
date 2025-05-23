@@ -46,7 +46,6 @@ tc = TonConnect(
 
 class SwapStates(StatesGroup):
     waiting_input = State()
-    setting_slippage = State()
     setting_max_splits = State()
     setting_max_length = State()
     token1 = State()
@@ -130,21 +129,23 @@ def _go_to_main_menu_markup() -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
-def _swap_menu_markup() -> InlineKeyboardMarkup:
+async def _swap_menu_markup(direction: str = "input") -> InlineKeyboardMarkup:
+
     builder = InlineKeyboardBuilder()
     builder.row(InlineKeyboardButton(text="Build route", callback_data="build_route"))
-    builder.row(InlineKeyboardButton(text="Token 1", callback_data="edit_token1"))
-    builder.row(InlineKeyboardButton(text="Token 2", callback_data="edit_token2"))
-    builder.row(InlineKeyboardButton(text="Amount", callback_data="edit_amount"))
-    builder.row(InlineKeyboardButton(text="Direction", callback_data="edit_direction"))
-    builder.row(InlineKeyboardButton(text="Options", callback_data="swap_options"))
-    builder.row(InlineKeyboardButton(text="Cancel", callback_data="cancel"))
+    builder.row(
+        InlineKeyboardButton(text="Input token", callback_data="edit_token1"),
+        InlineKeyboardButton(text="Output token", callback_data="edit_token2"),
+        InlineKeyboardButton(text="Amount", callback_data="edit_amount"),
+    )
+    builder.row(InlineKeyboardButton(text=f"Amount: {direction}", callback_data="edit_direction"))
+    builder.row(InlineKeyboardButton(text="Options", callback_data="swap_options"), 
+                InlineKeyboardButton(text="Cancel", callback_data="cancel"))
     return builder.as_markup()
 
 
 def _swap_options_markup() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
-    builder.row(InlineKeyboardButton(text="Slippage", callback_data="set_slippage"))
     builder.row(InlineKeyboardButton(text="Max Splits", callback_data="set_max_splits"))
     builder.row(InlineKeyboardButton(text="Max Length", callback_data="set_max_length"))
     builder.row(InlineKeyboardButton(text="Back", callback_data="back"))
@@ -159,20 +160,20 @@ def _main_menu_markup() -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
-def _cancel_markup() -> InlineKeyboardMarkup:
-    builder = InlineKeyboardBuilder()
-    builder.row(InlineKeyboardButton(text="Cancel", callback_data="cancel"))
-    return builder.as_markup()
-
-
 def _confirm_build_route_markup() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.row(
-        InlineKeyboardButton(text="Confirm transaction", callback_data="confirm_transaction"),
-        InlineKeyboardButton(text="Cancel", callback_data="cancel"),
+        InlineKeyboardButton(text="Initiate swap", callback_data="confirm_transaction"),
+        InlineKeyboardButton(text="Back", callback_data="back"),
         width=2,
     )
     return builder.as_markup()
+
+
+def _back_only_markup():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Back", callback_data="back")]
+    ])
 
 
 # ----------------------------
@@ -182,6 +183,7 @@ async def connect_wallet_window(state: FSMContext, user_id: int) -> None:
     connector = await tc.init_connector(user_id)
     state_data = await state.get_data()
     wallets = await tc.get_wallets()
+    wallets = [w for w in wallets if w.app_name.lower() in ("tonkeeper", "telegram-wallet")]
 
     selected_wallet = state_data.get("selected_wallet", wallets[0].app_name)
     selected_wallet = next(w for w in wallets if w.app_name == selected_wallet)
@@ -235,8 +237,7 @@ async def transaction_sent_window(user_id: int, transaction: SendTransactionResp
     )
     reply_markup = _go_to_main_menu_markup()
 
-    message = await bot.send_message(chat_id=user_id, text=text, reply_markup=reply_markup)
-    await delete_last_message(user_id, message.message_id)
+    await bot.send_message(chat_id=user_id, text=text, reply_markup=reply_markup)
 
 
 async def error_window(user_id: int, message_text: str, button_text: str, callback_data: str) -> None:
@@ -268,20 +269,18 @@ async def swap_menu_window(user_id: int, state: FSMContext) -> None:
 
     await state.update_data(back_state="swap_menu")
 
-    reply_markup = _swap_menu_markup()
+    reply_markup = await _swap_menu_markup(direction)
     msg = await bot.send_message(chat_id=user_id, text=text, reply_markup=reply_markup)
     await delete_last_message(user_id, msg.message_id)
 
 
 async def swap_options_window(user_id: int, state: FSMContext) -> None:
     data = await state.get_data()
-    slippage = data.get("slippage", 0.5)
-    max_splits = data.get("max_splits", 5)
-    max_length = data.get("max_length", 10)
+    max_splits = data.get("max_splits", 1)
+    max_length = data.get("max_length", 2)
 
     text = (
         f"<b>Options:</b>\n"
-        f"• Slippage: <code>{slippage}</code>\n"
         f"• Max Splits: <code>{max_splits}</code>\n"
         f"• Max Length: <code>{max_length}</code>"
     )
@@ -354,16 +353,19 @@ async def transaction_error_event(error: TonConnectError, user_id: int) -> None:
 # ----------------------------
 @dp.callback_query(F.data == "edit_token1")
 async def edit_token1_handler(callback: CallbackQuery, state: FSMContext):
-    await callback.message.answer("Enter Token 1 symbol (e.g. TON):")
+    msg = await callback.message.answer("Enter Token 1 symbol (e.g. TON):")
+    await delete_last_message(callback.from_user.id, msg.message_id)
     await state.set_state(SwapStates.token1)
     await callback.answer()
 
 
 @dp.message(SwapStates.token1)
 async def token1_input_handler(message: Message, state: FSMContext):
+    await delete_last_message(message.from_user.id, message.message_id)
     token = message.text.strip().upper()
     if not await _is_valid_token(token):
-        await message.answer("Invalid token symbol. Please try again.")
+        msg = await message.answer("Invalid token symbol. Please try again.")
+        await delete_last_message(message.from_user.id, msg.message_id)
         return
     await state.update_data(token1=token)
     await swap_menu_window(message.from_user.id, state)
@@ -372,16 +374,19 @@ async def token1_input_handler(message: Message, state: FSMContext):
 
 @dp.callback_query(F.data == "edit_token2")
 async def edit_token2_handler(callback: CallbackQuery, state: FSMContext):
-    await callback.message.answer("Enter Token 2 symbol (e.g. USDT):")
+    msg = await callback.message.answer("Enter Token 2 symbol (e.g. USDT):")
+    await delete_last_message(callback.from_user.id, msg.message_id)
     await state.set_state(SwapStates.token2)
     await callback.answer()
 
 
 @dp.message(SwapStates.token2)
 async def token2_input_handler(message: Message, state: FSMContext):
+    await delete_last_message(message.from_user.id, message.message_id)
     token = message.text.strip().upper()
     if not await _is_valid_token(token):
-        await message.answer("Invalid token symbol. Please try again.")
+        msg = await message.answer("Invalid token symbol. Please try again.")
+        await delete_last_message(message.from_user.id, msg.message_id)
         return
     await state.update_data(token2=token)
     await swap_menu_window(message.from_user.id, state)
@@ -390,23 +395,27 @@ async def token2_input_handler(message: Message, state: FSMContext):
 
 @dp.callback_query(F.data == "edit_amount")
 async def edit_amount_handler(callback: CallbackQuery, state: FSMContext):
-    await callback.message.answer("Enter amount (number):")
+    msg = await callback.message.answer("Enter amount (number):")
+    await delete_last_message(callback.from_user.id, msg.message_id)
     await state.set_state(SwapStates.amount)
     await callback.answer()
 
 
 @dp.message(SwapStates.amount)
 async def amount_input_handler(message: Message, state: FSMContext):
+    await delete_last_message(message.from_user.id, message.message_id)
     try:
         amount = float(message.text.strip())
         if amount <= 0:
             raise ValueError
     except ValueError:
-        await message.answer("Invalid amount. Please enter a positive number.")
+        msg = await message.answer("Invalid amount. Please enter a positive number.")
+        await delete_last_message(message.from_user.id, msg.message_id)
         return
     await state.update_data(amount=str(amount))
     await swap_menu_window(message.from_user.id, state)
     await state.set_state(None)
+
 
 
 @dp.callback_query(F.data == "edit_direction")
@@ -416,7 +425,7 @@ async def edit_direction_handler(callback: CallbackQuery, state: FSMContext):
     new_direction = "output" if current == "input" else "input"
     await state.update_data(direction=new_direction)
     await swap_menu_window(callback.from_user.id, state)
-    await callback.answer(f"Direction switched to: {'Amount to receive' if new_direction == 'to' else 'Amount to send'}")
+    await callback.answer(f"Direction switched to: {'Amount to receive' if new_direction == 'input' else 'Amount to send'}")
 
 
 @dp.message(CommandStart())
@@ -445,37 +454,24 @@ async def test_command(message: Message):
         await message.answer(f"Error during test swap: {str(e)}")
 
 
-@dp.message(SwapStates.setting_slippage)
-async def set_slippage(message: Message, state: FSMContext):
-    try:
-        value = float(message.text.strip())
-        if value <= 0:
-            raise ValueError
-        await state.update_data(slippage=value)
-        await message.answer(f"✅ Slippage set to {value}")
-    except ValueError:
-        await error_window(
-            message.from_user.id,
-            "❌ Invalid value. Enter a positive number.",
-            "Try again",
-            "set_slippage",
-        )
-        return
-    await swap_options_window(message.from_user.id, state)
-
-
 @dp.message(SwapStates.setting_max_splits)
 async def set_max_splits(message: Message, state: FSMContext):
+    data = await state.get_data()
+    prompt_id = data.get("prompt_message_id")
+    if prompt_id:
+        with suppress(Exception):
+            await bot.delete_message(chat_id=message.chat.id, message_id=prompt_id)
+
     try:
         value = int(message.text.strip())
-        if value <= 0:
+        if value <= 0 | value > 20:
             raise ValueError
         await state.update_data(max_splits=value)
         await message.answer(f"✅ Max Splits set to {value}")
     except ValueError:
         await error_window(
             message.from_user.id,
-            "❌ Invalid value. Enter a positive integer.",
+            "❌ Invalid value. Should be in range from '1' to '20'",
             "Try again",
             "set_max_splits",
         )
@@ -485,16 +481,22 @@ async def set_max_splits(message: Message, state: FSMContext):
 
 @dp.message(SwapStates.setting_max_length)
 async def set_max_length(message: Message, state: FSMContext):
+    data = await state.get_data()
+    prompt_id = data.get("prompt_message_id")
+    if prompt_id:
+        with suppress(Exception):
+            await bot.delete_message(chat_id=message.chat.id, message_id=prompt_id)
+
     try:
         value = int(message.text.strip())
-        if value <= 0:
+        if value <= 1 | value > 5:
             raise ValueError
         await state.update_data(max_length=value)
         await message.answer(f"✅ Max Length set to {value}")
     except ValueError:
         await error_window(
             message.from_user.id,
-            "❌ Invalid value. Enter a positive integer.",
+            "❌ Invalid value. Should be in range from '2' to '5'",
             "Try again",
             "set_max_length",
         )
@@ -505,34 +507,57 @@ async def set_max_length(message: Message, state: FSMContext):
 @dp.callback_query(F.data == "build_route")
 async def build_route_handler(callback_query: CallbackQuery, state: FSMContext):
     await callback_query.answer()
-
     data = await state.get_data()
     input_token = TOKENS.get(data.get("token1"))
     output_token = TOKENS.get(data.get("token2"))
     amount = float(data.get("amount"))
     direction = data.get("direction", "input")
+    max_splits = data.get("max_splits")
+    max_length = data.get("max_length")
 
     is_input = True if direction == "input" else False
 
-    route = get_swap_route(input_token, output_token, amount, is_input)
+    route = get_swap_route(input_token, output_token, amount, max_splits, max_length, is_input)
+
+    if not route.get("paths"):
+        await delete_last_message(callback_query.from_user.id, (await dp.fsm.resolve_context(bot, callback_query.from_user.id, callback_query.from_user.id).get_data()).get("last_message_id"))
+        msg = await bot.send_message(
+            callback_query.from_user.id,
+            "<b>Swap route not found.</b>\nPlease check the parameters and try again.",
+            reply_markup=_back_only_markup(),
+            parse_mode="HTML"
+        )
+        await delete_last_message(callback_query.from_user.id, msg.message_id) 
+        return
 
     input_symbol = route["input_token"]["metadata"]["symbol"]
     output_symbol = route["output_token"]["metadata"]["symbol"]
     input_amount = route["input_amount"]
     output_amount = route["output_amount"]
-    price_impact = route["price_impact"]
-    cashback = route["estimated_cashback_usd"]
-    savings = route["savings"]
+
+    def format_path(path):
+        chain = []
+        current = path
+        while current:
+            dex = current.get("dex", "unknown")
+            token_in = current["input_token"]["metadata"]["symbol"]
+            token_out = current["output_token"]["metadata"]["symbol"]
+            out_amount = current.get("swap", {}).get("output_amount", "N/A")
+            if isinstance(out_amount, float):
+                out_amount = round(out_amount, 6)
+            chain.append(f"{dex}: {token_in} → {token_out} (Output Amount: {out_amount})")
+            current = current.get("next", [{}])[0] if current.get("next") else None
+        return "\n".join(chain)
+
+    route_details = format_path(route["paths"][0])
 
     response = (
         f"🔁 <b>Swap Route:</b>\n"
         f"<b>From:</b> {input_symbol}\n"
         f"<b>To:</b> {output_symbol}\n"
         f"<b>Input Amount:</b> {input_amount}\n"
-        f"<b>Output Amount:</b> {output_amount}\n"
-        f"<b>Price Impact:</b> {price_impact}%\n"
-        f"<b>Estimated Cashback:</b> ${cashback}\n"
-        f"<b>Savings:</b> ${savings}"
+        f"<b>Output Amount:</b> {round(output_amount, 6)}\n"
+        f"<b>Route Path:</b>\n{route_details}"
     )
 
     await state.update_data(route=route)
@@ -551,12 +576,12 @@ async def confirm_transaction_handler(callback: CallbackQuery, state: FSMContext
             connector=connector,
             sender_address=connector.wallet.account.address.to_str(is_bounceable=False),
             route=data.get("route"))
-       
-        if transaction:
-            await error_window(callback.from_user.id, "Transaction was sent.", "Back", "swap_menu")    
+
+        if transaction is not None:
+            await send_transaction_window(callback.from_user.id)
         else:
             await error_window(callback.from_user.id, "Transaction was not sent.", "Back", "swap_menu")
-   
+
     except Exception as e:
         logging.error("Transaction error:\n%s", traceback.format_exc())
         await error_window(callback.from_user.id, f"Error: {e}", "Back", "swap_menu")
@@ -610,15 +635,14 @@ async def callback_query_handler(callback_query: CallbackQuery, state: FSMContex
         await wallet_connected_window(callback_query.from_user.id, state)
     elif data == "swap_options":
         await swap_options_window(callback_query.from_user.id, state)
-    elif data == "set_slippage":
-        await state.set_state(SwapStates.setting_slippage)
-        await bot.send_message(chat_id=callback_query.from_user.id, text="Enter slippage (positive number):")
     elif data == "set_max_splits":
         await state.set_state(SwapStates.setting_max_splits)
-        await bot.send_message(chat_id=callback_query.from_user.id, text="Enter max splits (integer):")
+        msg = await bot.send_message(chat_id=callback_query.from_user.id, text="Enter max splits (integer):")
+        await state.update_data(prompt_message_id=msg.message_id)
     elif data == "set_max_length":
         await state.set_state(SwapStates.setting_max_length)
-        await bot.send_message(chat_id=callback_query.from_user.id, text="Enter max length (integer):")
+        msg = await bot.send_message(chat_id=callback_query.from_user.id, text="Enter max length (integer):")
+        await state.update_data(prompt_message_id=msg.message_id)
     elif data == "back":
         back_state = (await state.get_data()).get("back_state")
         await state.update_data(back_state="clear")
