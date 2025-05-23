@@ -29,6 +29,8 @@ def get_swap_route(
         input_address: str,
         output_address: str,
         amount: float,
+        max_splits: int,
+        max_length: int,
         is_input: bool = True
 ) -> dict:
     """
@@ -53,22 +55,27 @@ def get_swap_route(
         "output_token": {
             "blockchain": "ton",
             "address": output_address
-        }
+        },
+        "max_splits": max_splits,
+        "max_length": max_length
     }
 
     if is_input:
         payload["input_amount"] = amount
     else:
         payload["output_amount"] = amount
-
     try:
         response = requests.post(url, json=payload)
         response.raise_for_status()
-
         return response.json()
 
+    except requests.exceptions.HTTPError as e:
+        error_body = e.response.text if e.response is not None else "No response body"
+        raise SwapCoffeeException(f"HTTPError: {e} - Response Body: {error_body}")
+
     except requests.exceptions.RequestException as e:
-        raise SwapCoffeeException(e)
+        raise SwapCoffeeException(f"RequestException: {e}")
+
 
 def get_prepared_transaction(
         sender_address: str,

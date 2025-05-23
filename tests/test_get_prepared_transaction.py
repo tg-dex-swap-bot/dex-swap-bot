@@ -13,6 +13,8 @@ def test_get_prepared_transaction(tokens):
         token_in["address"]["address"],
         token_out["address"]["address"],
         amount,
+        2,
+        3,
         True
     )
 
