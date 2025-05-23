@@ -21,6 +21,8 @@ def test_get_swap_route_for_input(tokens):
         token_in["address"]["address"],
         token_out["address"]["address"],
         amount,
+        2,
+        3,
         True
     )
 
@@ -38,6 +40,8 @@ def test_get_swap_route_for_output(tokens):
         token_in["address"]["address"],
         token_out["address"]["address"],
         amount,
+        2,
+        3,
         False
     )
 
@@ -56,6 +60,8 @@ def test_get_swap_route_unknown_token(tokens):
         token_in["address"]["address"],
         "abc",
         amount,
+        2, 
+        3,
         True
     )
 
